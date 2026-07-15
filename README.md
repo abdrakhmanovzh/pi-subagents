@@ -6,22 +6,17 @@ Generic child-agent execution primitives for [Pi](https://github.com/badlogic/pi
 
 ## Install
 
-From a local checkout:
-
-```bash
-pi install /absolute/path/to/pi-subagents
-```
-
 From GitHub:
 
 ```bash
-pi install git:github.com/OWNER/pi-subagents
+pi install git:github.com/abdrakhmanovzh/pi-subagents
 ```
 
-Pin a tagged release when stability matters:
+From a local checkout:
 
 ```bash
-pi install git:github.com/OWNER/pi-subagents@v0.1.0
+git clone https://github.com/abdrakhmanovzh/pi-subagents.git
+pi install ./pi-subagents
 ```
 
 Restart Pi or run `/reload` after installation. Releases are distributed through GitHub; this package is not published to npm.
@@ -50,7 +45,7 @@ Optional fields:
 - `model`: Pi model pattern or `provider/model`
 - `thinkingLevel`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
 - `cwd`: child working directory; relative paths resolve from the parent working directory
-- `timeoutMs`: execution timeout; defaults to 10 minutes
+- `timeoutMs`: execution timeout; defaults to 30 minutes
 - `keepAlive`: keep an RPC child available for an explicit follow-up
 
 Models, thinking level, and working directory inherit from the parent when omitted.

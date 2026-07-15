@@ -5,7 +5,7 @@ import type { ChildRequest } from "./child-process.ts";
 import type { BuiltinToolName } from "./schemas.ts";
 import { validateTools } from "./scheduler.ts";
 
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface ChildInput {
   prompt: string;

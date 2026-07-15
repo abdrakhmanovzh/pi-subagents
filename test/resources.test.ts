@@ -41,6 +41,7 @@ test("normalizes model, cwd, and context files before launch", async () => {
     assert.equal(result.request.cwd, directory);
     assert.equal(result.request.model, "test/model");
     assert.equal(result.request.thinkingLevel, "medium");
+    assert.equal(result.request.timeoutMs, 30 * 60 * 1000);
     assert.deepEqual(result.request.contextFiles, [join(directory, "context.txt")]);
   } finally {
     await rm(directory, { recursive: true, force: true });
