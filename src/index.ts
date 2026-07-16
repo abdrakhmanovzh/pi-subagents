@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  Theme,
+  ToolRenderResultOptions,
+} from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { runOneShot, type ChildRequest } from "./child-process.ts";
 import { prepareChildRequest, type ChildDefaults } from "./resources.ts";
 import { RpcChildSession } from "./rpc-session.ts";
 import {
+  RoleAgentParameters,
   SpawnAgentParameters,
   SpawnAgentsParameters,
+  type RoleAgentInput,
   type SpawnAgentInput,
   type SpawnAgentsInput,
   type ParallelTaskInput,
@@ -26,6 +33,30 @@ import {
   type UsageStats,
   truncateOutput,
 } from "./results.ts";
+
+const EXPLORE_MODEL = "openai-codex/gpt-5.6-terra";
+const EXPLORE_TOOLS = ["read", "grep", "find", "ls"] as const;
+const EXPLORE_SYSTEM_PROMPT = `You are a codebase explorer. Investigate the requested area without modifying files.
+
+Return:
+- relevant files and symbols
+- exact path and line references
+- how the components connect
+- uncertainties or missing information
+
+Keep the result concise for handoff to another agent. Do not design or implement changes unless explicitly requested.`;
+
+const REVIEW_MODEL = "openai-codex/gpt-5.6-sol";
+const REVIEW_TOOLS = ["read", "grep", "find", "ls"] as const;
+const REVIEW_SYSTEM_PROMPT = `You are an independent code reviewer. Review the change against the stated requirement without modifying files.
+
+Prioritize:
+1. correctness bugs
+2. regressions
+3. security and data-loss risks
+4. missing tests
+
+Cite exact paths and lines. Do not report style preferences unless they create a concrete maintenance risk. If there are no findings, state that explicitly.`;
 
 interface ActiveRun {
   id: string;
@@ -163,6 +194,7 @@ function makeFailure(runId: string, error: string): RunResult {
 
 async function executeSingle(
   manager: RunManager,
+  runChild: typeof runOneShot,
   input: Pick<SpawnAgentInput, "runId" | "keepAlive">,
   request: ChildRequest,
   signal: AbortSignal | undefined,
@@ -200,7 +232,7 @@ async function executeSingle(
           run.controller.signal,
           (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType }),
         )
-      : await runOneShot(
+      : await runChild(
           request,
           run.controller.signal,
           (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType }),
@@ -249,7 +281,41 @@ function usageText(usage: UsageStats | undefined): string {
   return `${usage.model ?? "unknown model"} · ${tokens} tokens · $${usage.cost.toFixed(4)} · ${(usage.durationMs / 1000).toFixed(1)}s`;
 }
 
-export default function (pi: ExtensionAPI): void {
+function requireExactModel(request: ChildRequest, expectedModel: string): void {
+  if (request.model !== expectedModel) {
+    throw new Error(`Required role model ${expectedModel} is unavailable; resolved ${request.model ?? "no model"}.`);
+  }
+}
+
+function throwIfFailed(result: RunResult): void {
+  if (result.status === "failed") {
+    throw new Error(`Child ${result.runId} failed: ${result.error ?? "Unknown error."}`);
+  }
+}
+
+function renderRunResult(
+  result: AgentToolResult<unknown>,
+  options: ToolRenderResultOptions,
+  theme: Theme,
+): Text {
+  const details = result.details as RunResult | undefined;
+  if (!details?.status) {
+    const text = result.content.find((part) => part.type === "text");
+    return new Text(theme.fg("warning", compact(text?.text ?? "Running…")), 0, 0);
+  }
+  const color = details.status === "completed" ? "success" : details.status === "needs_input" ? "warning" : "error";
+  let text = theme.fg(color, details.status) + theme.fg("dim", ` · ${usageText(details.usage)}`);
+  if (options.expanded) {
+    if (details.output) text += `\n${details.output}`;
+    if (details.error) text += `\n${theme.fg("error", details.error)}`;
+    if (details.outputFile) text += `\n${theme.fg("dim", `Full output: ${details.outputFile}`)}`;
+  } else if (details.output) {
+    text += `\n${theme.fg("dim", compact(details.output, 160))}`;
+  }
+  return new Text(text, 0, 0);
+}
+
+export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneShot): void {
   const manager = new RunManager();
 
   pi.registerTool({
@@ -262,21 +328,18 @@ export default function (pi: ExtensionAPI): void {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const existing = params.runId ? manager.getPersistent(params.runId) : undefined;
       if (params.runId && !existing) {
-        const result = makeFailure(params.runId, `Unknown child run: ${params.runId}.`);
-        return { content: [{ type: "text", text: resultText(result) }], details: result, isError: true };
+        throw new Error(`Unknown child run: ${params.runId}.`);
       }
 
       const defaults: ChildDefaults = existing
         ? { cwd: existing.request.cwd, model: existing.request.model, thinkingLevel: existing.request.thinkingLevel }
         : { cwd: ctx.cwd, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinkingLevel: pi.getThinkingLevel() };
       const prepared = await prepareChildRequest(params, defaults, ctx.modelRegistry);
-      if (!prepared.ok) {
-        const result = makeFailure(params.runId ?? randomUUID(), prepared.error);
-        return { content: [{ type: "text", text: resultText(result) }], details: result, isError: true };
-      }
+      if (!prepared.ok) throw new Error(prepared.error);
 
       const result = await executeSingle(
         manager,
+        runChild,
         params,
         prepared.request,
         signal,
@@ -285,7 +348,8 @@ export default function (pi: ExtensionAPI): void {
           onUpdate?.({ content: [{ type: "text", text }], details });
         },
       );
-      return { content: [{ type: "text", text: resultText(result) }], details: result, isError: result.status === "failed" };
+      throwIfFailed(result);
+      return { content: [{ type: "text", text: resultText(result) }], details: result };
     },
     renderCall(args, theme) {
       const tools = Array.isArray(args.tools) ? args.tools.join(",") : "?";
@@ -299,21 +363,109 @@ export default function (pi: ExtensionAPI): void {
       );
     },
     renderResult(result, options, theme) {
-      const details = result.details as RunResult | undefined;
-      if (!details?.status) {
-        const text = result.content.find((part) => part.type === "text");
-        return new Text(theme.fg("warning", compact(text?.text ?? "Running…")), 0, 0);
-      }
-      const color = details.status === "completed" ? "success" : details.status === "needs_input" ? "warning" : "error";
-      let text = theme.fg(color, details.status) + theme.fg("dim", ` · ${usageText(details.usage)}`);
-      if (options.expanded) {
-        if (details.output) text += `\n${details.output}`;
-        if (details.error) text += `\n${theme.fg("error", details.error)}`;
-        if (details.outputFile) text += `\n${theme.fg("dim", `Full output: ${details.outputFile}`)}`;
-      } else if (details.output) {
-        text += `\n${theme.fg("dim", compact(details.output, 160))}`;
-      }
-      return new Text(text, 0, 0);
+      return renderRunResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "explore",
+    label: "Explore",
+    description: `Explore a codebase with the read-only ${EXPLORE_MODEL} child agent. Returns concise evidence with file and line references for handoff.`,
+    promptSnippet: "Explore a codebase with a fast read-only child agent",
+    promptGuidelines: [
+      "Use explore for focused codebase discovery that would otherwise consume the parent context. Multiple explore calls can run in parallel for independent areas.",
+    ],
+    executionMode: "parallel",
+    parameters: RoleAgentParameters,
+    async execute(_toolCallId, params: RoleAgentInput, signal, onUpdate, ctx) {
+      const prepared = await prepareChildRequest(
+        {
+          ...params,
+          systemPrompt: EXPLORE_SYSTEM_PROMPT,
+          model: EXPLORE_MODEL,
+          thinkingLevel: "medium",
+          tools: EXPLORE_TOOLS,
+        },
+        { cwd: ctx.cwd },
+        ctx.modelRegistry,
+      );
+      if (!prepared.ok) throw new Error(prepared.error);
+      requireExactModel(prepared.request, EXPLORE_MODEL);
+
+      const result = await executeSingle(
+        manager,
+        runChild,
+        {},
+        prepared.request,
+        signal,
+        DEFAULT_CONCURRENCY,
+        (text, details) => onUpdate?.({ content: [{ type: "text", text }], details }),
+      );
+      throwIfFailed(result);
+      return { content: [{ type: "text", text: resultText(result) }], details: result };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("explore ")) +
+          theme.fg("accent", compact(args.prompt ?? "…")) +
+          theme.fg("dim", ` [${EXPLORE_MODEL}; read-only]`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, options, theme) {
+      return renderRunResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "review",
+    label: "Review",
+    description: `Review code independently with the ${REVIEW_MODEL} child agent. Prioritizes concrete correctness, regression, security, and test findings without editing files.`,
+    promptSnippet: "Review code with a strong independent child agent",
+    promptGuidelines: [
+      "Use review after implementation when an independent correctness pass is valuable. Include the requirement and relevant change scope in its prompt or context.",
+    ],
+    executionMode: "parallel",
+    parameters: RoleAgentParameters,
+    async execute(_toolCallId, params: RoleAgentInput, signal, onUpdate, ctx) {
+      const prepared = await prepareChildRequest(
+        {
+          ...params,
+          systemPrompt: REVIEW_SYSTEM_PROMPT,
+          model: REVIEW_MODEL,
+          thinkingLevel: "high",
+          tools: REVIEW_TOOLS,
+        },
+        { cwd: ctx.cwd },
+        ctx.modelRegistry,
+      );
+      if (!prepared.ok) throw new Error(prepared.error);
+      requireExactModel(prepared.request, REVIEW_MODEL);
+
+      const result = await executeSingle(
+        manager,
+        runChild,
+        {},
+        prepared.request,
+        signal,
+        DEFAULT_CONCURRENCY,
+        (text, details) => onUpdate?.({ content: [{ type: "text", text }], details }),
+      );
+      throwIfFailed(result);
+      return { content: [{ type: "text", text: resultText(result) }], details: result };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("review ")) +
+          theme.fg("accent", compact(args.prompt ?? "…")) +
+          theme.fg("dim", ` [${REVIEW_MODEL}; no edits]`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, options, theme) {
+      return renderRunResult(result, options, theme);
     },
   });
 
@@ -330,13 +482,7 @@ export default function (pi: ExtensionAPI): void {
       const validationError = params.tasks
         .map((task) => validateParallelTools(task.tools))
         .find((error): error is string => Boolean(error));
-      if (validationError) {
-        return {
-          content: [{ type: "text", text: resultText({ results: [], usage: aggregateUsage([]), error: validationError }) }],
-          details: { results: [], usage: aggregateUsage([]), error: validationError },
-          isError: true,
-        };
-      }
+      if (validationError) throw new Error(validationError);
 
       const defaults: ChildDefaults = {
         cwd: ctx.cwd,
@@ -345,10 +491,7 @@ export default function (pi: ExtensionAPI): void {
       };
       const prepared = await Promise.all(params.tasks.map((task) => prepareChildRequest(task, defaults, ctx.modelRegistry)));
       const preparationError = prepared.find((result) => !result.ok);
-      if (preparationError && !preparationError.ok) {
-        const payload = { results: [], usage: aggregateUsage([]), error: preparationError.error };
-        return { content: [{ type: "text", text: resultText(payload) }], details: payload, isError: true };
-      }
+      if (preparationError && !preparationError.ok) throw new Error(preparationError.error);
       const requests = prepared.map((result) => {
         if (!result.ok) throw new Error(result.error);
         return result.request;
@@ -358,6 +501,7 @@ export default function (pi: ExtensionAPI): void {
       await mapWithConcurrency(params.tasks, limit, async (task: ParallelTaskInput, index) => {
         const result = await executeSingle(
           manager,
+          runChild,
           {},
           requests[index]!,
           _signal,

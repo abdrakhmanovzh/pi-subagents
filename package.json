@@ -1,7 +1,7 @@
 {
   "name": "pi-subagents",
   "version": "0.1.0",
-  "description": "Generic subagent execution primitives for Pi",
+  "description": "Subagent execution primitives with focused explore and review roles for Pi",
   "type": "module",
   "keywords": ["pi-package", "pi", "subagents", "coding-agent"],
   "license": "MIT",

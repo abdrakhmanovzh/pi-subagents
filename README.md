@@ -1,8 +1,8 @@
 # pi-subagents
 
-Generic child-agent execution primitives for [Pi](https://github.com/badlogic/pi-mono).
+Child-agent execution primitives and focused exploration and review roles for [Pi](https://github.com/badlogic/pi-mono).
 
-`pi-subagents` defines no roles, agents, chains, or workflows. The parent supplies every child prompt, model, tool set, working directory, and piece of context.
+`pi-subagents` provides generic child execution alongside two narrow presets. `explore` performs fast read-only codebase discovery, while `review` performs an independent correctness review. The generic tools still let the parent supply every child prompt, model, tool set, working directory, and piece of context.
 
 ## Install
 
@@ -22,6 +22,35 @@ pi install ./pi-subagents
 Restart Pi or run `/reload` after installation. Releases are distributed through GitHub; this package is not published to npm.
 
 ## Tools
+
+### `explore`
+
+Runs a focused read-only codebase explorer using `openai-codex/gpt-5.6-terra` with medium thinking. The role is instructed to return concise evidence with exact file and line references for handoff.
+
+```json
+{
+  "prompt": "Trace how authentication state reaches API route handlers.",
+  "contextFiles": ["src/auth.ts"],
+  "timeoutMs": 300000
+}
+```
+
+The explorer has `read`, `grep`, `find`, and `ls`. Independent `explore` calls can execute in parallel.
+
+### `review`
+
+Runs an independent reviewer using `openai-codex/gpt-5.6-sol` with high thinking. The reviewer prioritizes correctness bugs, regressions, security and data-loss risks, and missing tests. It does not receive edit or write tools.
+
+```json
+{
+  "prompt": "Review the current authentication changes against this requirement: expired sessions must return 401.",
+  "contextFiles": ["src/auth.ts", "test/auth.test.ts"]
+}
+```
+
+The reviewer has only `read`, `grep`, `find`, and `ls`. Independent review calls can execute in parallel. Include the requirement and relevant change scope in the prompt or explicit context because the reviewer cannot run `git diff` itself.
+
+Both roles accept optional `contextText`, `contextFiles`, `cwd`, and `timeoutMs`. Their model, thinking level, tools, and system prompt are fixed by the role. Fixed model identifiers must resolve exactly; fuzzy model matches are rejected.
 
 ### `spawn_agent`
 
@@ -121,7 +150,7 @@ Each child returns a structured envelope:
 }
 ```
 
-Statuses are `completed`, `failed`, `cancelled`, and `needs_input`. Children are instructed to prefix an unavoidable clarification question with `NEEDS_INPUT:` so it can be mapped to `needs_input` without opening child UI.
+Statuses are `completed`, `failed`, `cancelled`, and `needs_input`. A failed single child causes `spawn_agent`, `explore`, or `review` to throw a tool error. Parallel batches preserve each child envelope so the parent can inspect partial successes and failures. Children are instructed to prefix an unavoidable clarification question with `NEEDS_INPUT:` so it can be mapped to `needs_input` without opening child UI.
 
 Outputs over 50 KiB are truncated in the result. The complete output is written to a temporary file reported as `outputFile` and removed when the parent session shuts down.
 

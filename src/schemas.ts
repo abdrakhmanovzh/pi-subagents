@@ -14,29 +14,38 @@ export const ThinkingLevelSchema = StringEnum(
 const ToolSchema = StringEnum(BUILTIN_TOOLS);
 const ReadOnlyToolSchema = StringEnum(READ_ONLY_TOOLS);
 
-const ContextFields = {
-  systemPrompt: Type.Optional(Type.String()),
+const SharedContextFields = {
   contextText: Type.Optional(Type.String()),
   contextFiles: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
-  model: Type.Optional(Type.String()),
-  thinkingLevel: Type.Optional(ThinkingLevelSchema),
   cwd: Type.Optional(Type.String()),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
 };
+
+const ConfigurableContextFields = {
+  systemPrompt: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()),
+  thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  ...SharedContextFields,
+};
+
+export const RoleAgentParameters = Type.Object({
+  prompt: Type.String({ minLength: 1 }),
+  ...SharedContextFields,
+});
 
 export const SpawnAgentParameters = Type.Object({
   runId: Type.Optional(Type.String()),
   keepAlive: Type.Optional(Type.Boolean({ description: "Keep the child RPC session alive and return a runId for explicit follow-ups." })),
   prompt: Type.String({ minLength: 1 }),
   tools: Type.Array(ToolSchema, { minItems: 1 }),
-  ...ContextFields,
+  ...ConfigurableContextFields,
 });
 
 export const ParallelTask = Type.Object({
   taskId: Type.Optional(Type.String()),
   prompt: Type.String({ minLength: 1 }),
   tools: Type.Array(ReadOnlyToolSchema, { minItems: 1 }),
-  ...ContextFields,
+  ...ConfigurableContextFields,
 });
 
 export const SpawnAgentsParameters = Type.Object({
@@ -44,6 +53,7 @@ export const SpawnAgentsParameters = Type.Object({
   maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
 });
 
+export type RoleAgentInput = Static<typeof RoleAgentParameters>;
 export type SpawnAgentInput = Static<typeof SpawnAgentParameters>;
 export type ParallelTaskInput = Static<typeof ParallelTask>;
 export type SpawnAgentsInput = Static<typeof SpawnAgentsParameters>;
