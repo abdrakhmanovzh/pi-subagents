@@ -33,16 +33,33 @@ export const RoleAgentParameters = Type.Object({
   ...SharedContextFields,
 });
 
+export const ReviewAgentParameters = Type.Object({
+  prompt: Type.String({ minLength: 1 }),
+  includeDiff: Type.Optional(Type.Boolean({ description: "Include the tracked working-tree diff against HEAD. Defaults to false." })),
+  ...SharedContextFields,
+});
+
 export const SpawnAgentParameters = Type.Object({
-  runId: Type.Optional(Type.String()),
-  keepAlive: Type.Optional(Type.Boolean({ description: "Keep the child RPC session alive and return a runId for explicit follow-ups." })),
+  keepAlive: Type.Optional(Type.Boolean({ description: "Keep the child RPC session alive and return a runId for continue_agent." })),
   prompt: Type.String({ minLength: 1 }),
   tools: Type.Array(ToolSchema, { minItems: 1 }),
   ...ConfigurableContextFields,
 });
 
+export const ContinueAgentParameters = Type.Object({
+  runId: Type.String(),
+  prompt: Type.String({ minLength: 1 }),
+  contextText: Type.Optional(Type.String()),
+  contextFiles: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+});
+
+export const CloseAgentParameters = Type.Object({
+  runId: Type.String(),
+});
+
 export const ParallelTask = Type.Object({
-  taskId: Type.Optional(Type.String()),
+  taskId: Type.Optional(Type.String({ minLength: 1 })),
   prompt: Type.String({ minLength: 1 }),
   tools: Type.Array(ReadOnlyToolSchema, { minItems: 1 }),
   ...ConfigurableContextFields,
@@ -54,6 +71,9 @@ export const SpawnAgentsParameters = Type.Object({
 });
 
 export type RoleAgentInput = Static<typeof RoleAgentParameters>;
+export type ReviewAgentInput = Static<typeof ReviewAgentParameters>;
 export type SpawnAgentInput = Static<typeof SpawnAgentParameters>;
+export type ContinueAgentInput = Static<typeof ContinueAgentParameters>;
+export type CloseAgentInput = Static<typeof CloseAgentParameters>;
 export type ParallelTaskInput = Static<typeof ParallelTask>;
 export type SpawnAgentsInput = Static<typeof SpawnAgentsParameters>;

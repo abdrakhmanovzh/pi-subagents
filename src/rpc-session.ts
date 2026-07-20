@@ -81,6 +81,10 @@ export class RpcChildSession {
     this.child.stderr?.on("data", (chunk: Buffer) => {
       this.stderr += chunk.toString("utf8");
     });
+    this.child.stdin?.on("error", (error) => {
+      this.finishWithError(error.message);
+      this.dispose();
+    });
     this.child.once("error", (error) => {
       this.closed = true;
       this.finishWithError(error.message);

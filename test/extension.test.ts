@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -17,9 +18,13 @@ interface CapturedTool {
   executionMode?: string;
   parameters: { properties?: Record<string, unknown> };
   execute: (...args: unknown[]) => Promise<ToolResult>;
+  renderResult?: (...args: unknown[]) => { text: string };
 }
 
-function captureTools(runChild?: RunChild): Map<string, CapturedTool> {
+function captureTools(
+  runChild?: RunChild,
+  exec: (_command: string, _args: string[]) => Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> = async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+): Map<string, CapturedTool> {
   const tools = new Map<string, CapturedTool>();
   const api = {
     registerTool(tool: { name: string }) {
@@ -27,6 +32,7 @@ function captureTools(runChild?: RunChild): Map<string, CapturedTool> {
     },
     registerCommand() {},
     on() {},
+    exec,
     getThinkingLevel() {
       return "medium";
     },
@@ -91,7 +97,7 @@ test("registers focused explore and review roles", () => {
 
   const roleFields = ["prompt", "contextText", "contextFiles", "cwd", "timeoutMs"];
   assert.deepEqual(Object.keys(explore.parameters.properties ?? {}), roleFields);
-  assert.deepEqual(Object.keys(review.parameters.properties ?? {}), roleFields);
+  assert.deepEqual(Object.keys(review.parameters.properties ?? {}), ["prompt", "includeDiff", "contextText", "contextFiles", "cwd", "timeoutMs"]);
 });
 
 test("executes roles with fixed capabilities and forwards explicit context", async () => {
@@ -156,6 +162,49 @@ test("executes roles with fixed capabilities and forwards explicit context", asy
     cwd: process.cwd(),
     timeoutMs: 5678,
   });
+});
+
+test("can include the tracked working-tree diff in review context", async () => {
+  const requests: ChildRequest[] = [];
+  const tools = captureTools(
+    async (request) => {
+      requests.push(request);
+      return childExecution();
+    },
+    async (_command, args) => {
+      const output = args.find((arg) => arg.startsWith("--output="));
+      assert.ok(output);
+      await writeFile(output.slice("--output=".length), `${"a".repeat(100 * 1024)}extra`, "utf8");
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    },
+  );
+  const review = tools.get("review");
+  assert.ok(review);
+
+  await review.execute(
+    "review-call",
+    { prompt: "Review the change", includeDiff: true, contextText: "Requirement" },
+    undefined,
+    undefined,
+    context,
+  );
+
+  assert.match(requests[0]?.contextText ?? "", /Requirement/);
+  assert.match(requests[0]?.contextText ?? "", /Tracked working-tree diff against HEAD/);
+  assert.match(requests[0]?.contextText ?? "", /Diff truncated; 5 bytes omitted/);
+});
+
+test("rejects an interrupted review diff", async () => {
+  const review = captureTools(
+    async () => childExecution(),
+    async () => ({ stdout: "", stderr: "", code: 0, killed: true }),
+  ).get("review");
+  assert.ok(review);
+
+  await assert.rejects(
+    review.execute("review-call", { prompt: "Review", includeDiff: true }, undefined, undefined, context),
+    /Unable to collect review diff: git was interrupted/,
+  );
 });
 
 test("rejects fuzzy matches for fixed role models", async () => {
@@ -266,18 +315,62 @@ test("rejects an entire parallel batch containing write tools", async () => {
   );
 });
 
-test("throws for a stale run id", async () => {
-  const tool = captureTools().get("spawn_agent");
+test("preserves task ids and distinguishes timeouts in parallel results", async () => {
+  const runChild: RunChild = async (request) => request.prompt === "slow"
+    ? childExecution({ timedOut: true, cancelled: true, error: "timed out" })
+    : childExecution();
+  const tool = captureTools(runChild).get("spawn_agents");
   assert.ok(tool);
 
+  const result = await tool.execute(
+    "call",
+    {
+      tasks: [
+        { taskId: "slow-task", prompt: "slow", tools: ["read"] },
+        { taskId: "fast-task", prompt: "fast", tools: ["read"] },
+      ],
+      maxConcurrency: 2,
+    },
+    undefined,
+    undefined,
+    context,
+  );
+  const children = (result.details as { results: Array<{ taskId?: string; status: string }> }).results;
+  assert.deepEqual(children.map(({ taskId, status }) => ({ taskId, status })), [
+    { taskId: "slow-task", status: "timed_out" },
+    { taskId: "fast-task", status: "completed" },
+  ]);
+
+  assert.ok(tool.renderResult);
+  const rendered = tool.renderResult(
+    result,
+    { expanded: false, isPartial: false },
+    {
+      fg: (color: string, text: string) => `[${color}]${text}`,
+      bold: (text: string) => text,
+    },
+  );
+  assert.match(rendered.text, /^\[warning\]/);
+});
+
+test("registers focused persistent-child management tools", async () => {
+  const tools = captureTools();
+  const spawn = tools.get("spawn_agent");
+  const continueAgent = tools.get("continue_agent");
+  const closeAgent = tools.get("close_agent");
+  assert.ok(spawn);
+  assert.ok(continueAgent);
+  assert.ok(closeAgent);
+
+  assert.equal("runId" in (spawn.parameters.properties ?? {}), false);
+  assert.deepEqual(Object.keys(continueAgent.parameters.properties ?? {}), ["runId", "prompt", "contextText", "contextFiles", "timeoutMs"]);
+  assert.deepEqual(Object.keys(closeAgent.parameters.properties ?? {}), ["runId"]);
   await assert.rejects(
-    tool.execute(
-      "call",
-      { runId: "missing", prompt: "continue", tools: ["read"] },
-      undefined,
-      undefined,
-      context,
-    ),
+    continueAgent.execute("call", { runId: "missing", prompt: "continue" }, undefined, undefined, context),
+    /Unknown child run: missing/,
+  );
+  await assert.rejects(
+    closeAgent.execute("call", { runId: "missing" }, undefined, undefined, context),
     /Unknown child run: missing/,
   );
 });

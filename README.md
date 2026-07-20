@@ -44,13 +44,14 @@ Runs an independent reviewer using `openai-codex/gpt-5.6-sol` with high thinking
 ```json
 {
   "prompt": "Review the current authentication changes against this requirement: expired sessions must return 401.",
+  "includeDiff": true,
   "contextFiles": ["src/auth.ts", "test/auth.test.ts"]
 }
 ```
 
-The reviewer has only `read`, `grep`, `find`, and `ls`. Independent review calls can execute in parallel. Include the requirement and relevant change scope in the prompt or explicit context because the reviewer cannot run `git diff` itself.
+The reviewer has only `read`, `grep`, `find`, and `ls`. Independent review calls can execute in parallel. Set `includeDiff` to include a bounded copy of the tracked working-tree diff against `HEAD` without granting the child shell access. Untracked files must still be supplied through `contextFiles`.
 
-Both roles accept optional `contextText`, `contextFiles`, `cwd`, and `timeoutMs`. Their model, thinking level, tools, and system prompt are fixed by the role. Fixed model identifiers must resolve exactly; fuzzy model matches are rejected.
+Both roles accept optional `contextText`, `contextFiles`, `cwd`, and `timeoutMs`. `review` additionally accepts `includeDiff`. Their model, thinking level, tools, and system prompt are fixed by the role. Fixed model identifiers must resolve exactly; fuzzy model matches are rejected.
 
 ### `spawn_agent`
 
@@ -94,17 +95,16 @@ Start a resumable child:
 }
 ```
 
-Use the returned `runId` in a later call:
+Use the returned `runId` with `continue_agent`:
 
 ```json
 {
   "runId": "RETURNED_RUN_ID",
-  "prompt": "Which invariant is most fragile?",
-  "tools": ["read", "grep"]
+  "prompt": "Which invariant is most fragile?"
 }
 ```
 
-A follow-up must retain the original model, thinking level, tools, and working directory. Resumable children are in-memory and are terminated when the parent session reloads, switches, or exits.
+`continue_agent` reuses the original model, thinking level, tools, system prompt, and working directory automatically. It accepts optional `contextText`, `contextFiles`, and `timeoutMs`. Use `close_agent` with the `runId` to cancel an active persistent child or close an idle one. Resumable children are in-memory and are terminated when the parent session reloads, switches, or exits.
 
 ### `spawn_agents`
 
@@ -152,7 +152,9 @@ Each child returns a structured envelope:
 }
 ```
 
-Statuses are `completed`, `failed`, `cancelled`, and `needs_input`. A failed single child causes `spawn_agent`, `explore`, or `review` to throw a tool error. Parallel batches preserve each child envelope so the parent can inspect partial successes and failures. Children are instructed to prefix an unavoidable clarification question with `NEEDS_INPUT:` so it can be mapped to `needs_input` without opening child UI.
+Statuses are `completed`, `failed`, `cancelled`, `timed_out`, and `needs_input`. A failed single child causes `spawn_agent`, `continue_agent`, `explore`, or `review` to throw a tool error. Parallel batches preserve each child envelope and its optional `taskId` so the parent can inspect partial successes and failures. Children are instructed to prefix an unavoidable clarification question with `NEEDS_INPUT:` so it can be mapped to `needs_input` without opening child UI.
+
+While a child runs, progress updates identify its current tool action, such as the file being read or the pattern being searched.
 
 Outputs over 50 KiB are truncated in the result. The complete output is written to a temporary file reported as `outputFile` and removed when the parent session shuts down.
 

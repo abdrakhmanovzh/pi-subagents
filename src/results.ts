@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export const MAX_OUTPUT_BYTES = 50 * 1024;
 
-export type RunStatus = "completed" | "failed" | "cancelled" | "needs_input";
+export type RunStatus = "completed" | "failed" | "cancelled" | "timed_out" | "needs_input";
 
 export interface UsageStats {
   model?: string;
@@ -19,6 +19,7 @@ export interface UsageStats {
 
 export interface RunResult {
   runId: string;
+  taskId?: string;
   status: RunStatus;
   output?: string;
   error?: string;

@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -10,13 +14,18 @@ import { runOneShot, type ChildRequest } from "./child-process.ts";
 import { prepareChildRequest, type ChildDefaults } from "./resources.ts";
 import { RpcChildSession } from "./rpc-session.ts";
 import {
+  CloseAgentParameters,
+  ContinueAgentParameters,
+  ReviewAgentParameters,
   RoleAgentParameters,
   SpawnAgentParameters,
   SpawnAgentsParameters,
-  type RoleAgentInput,
-  type SpawnAgentInput,
-  type SpawnAgentsInput,
+  type CloseAgentInput,
+  type ContinueAgentInput,
   type ParallelTaskInput,
+  type ReviewAgentInput,
+  type RoleAgentInput,
+  type SpawnAgentsInput,
 } from "./schemas.ts";
 import {
   DEFAULT_CONCURRENCY,
@@ -48,6 +57,7 @@ Keep the result concise for handoff to another agent. Do not design or implement
 
 const REVIEW_MODEL = "openai-codex/gpt-5.6-sol";
 const REVIEW_TOOLS = ["read", "grep", "find", "ls"] as const;
+const MAX_REVIEW_DIFF_BYTES = 100 * 1024;
 const REVIEW_SYSTEM_PROMPT = `You are an independent code reviewer. Review the change against the stated requirement without modifying files.
 
 Prioritize:
@@ -173,7 +183,15 @@ async function completeResult(
   runId: string,
   execution: Awaited<ReturnType<typeof runOneShot>>,
 ): Promise<RunResult> {
-  const status = execution.cancelled ? "cancelled" : execution.error ? "failed" : execution.needsInput ? "needs_input" : "completed";
+  const status = execution.timedOut
+    ? "timed_out"
+    : execution.cancelled
+      ? "cancelled"
+      : execution.error
+        ? "failed"
+        : execution.needsInput
+          ? "needs_input"
+          : "completed";
   const result: RunResult = {
     runId,
     status,
@@ -195,7 +213,7 @@ function makeFailure(runId: string, error: string): RunResult {
 async function executeSingle(
   manager: RunManager,
   runChild: typeof runOneShot,
-  input: Pick<SpawnAgentInput, "runId" | "keepAlive">,
+  input: { runId?: string; keepAlive?: boolean },
   request: ChildRequest,
   signal: AbortSignal | undefined,
   requestedLimit = DEFAULT_CONCURRENCY,
@@ -230,12 +248,12 @@ async function executeSingle(
       ? await persistent.prompt(
           request,
           run.controller.signal,
-          (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType }),
+          (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType, toolName: progress.toolName }),
         )
       : await runChild(
           request,
           run.controller.signal,
-          (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType }),
+          (progress) => onUpdate?.(progress.text || "Running…", { runId, eventType: progress.eventType, toolName: progress.toolName }),
         );
     const result = await completeResult(manager, runId, execution);
     manager.record(result);
@@ -293,6 +311,54 @@ function throwIfFailed(result: RunResult): void {
   }
 }
 
+async function readDiffPrefix(path: string): Promise<string> {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    const buffer = Buffer.alloc(Math.min(size, MAX_REVIEW_DIFF_BYTES));
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+
+    const decoder = new StringDecoder("utf8");
+    const text = size > offset ? decoder.write(buffer.subarray(0, offset)) : decoder.end(buffer.subarray(0, offset));
+    if (size <= offset) return text;
+    return `${text}\n\n[Diff truncated; ${size - offset} bytes omitted.]`;
+  } finally {
+    await file.close();
+  }
+}
+
+async function addReviewDiff(
+  pi: ExtensionAPI,
+  request: ChildRequest,
+  signal: AbortSignal | undefined,
+): Promise<ChildRequest> {
+  const diffPath = join(tmpdir(), `pi-subagents-review-${randomUUID()}.diff`);
+  try {
+    const diff = await pi.exec("git", ["diff", "--no-ext-diff", `--output=${diffPath}`, "HEAD", "--"], {
+      cwd: request.cwd,
+      signal,
+      timeout: 10_000,
+    });
+    if (diff.killed || diff.code !== 0) {
+      const reason = diff.killed ? "git was interrupted" : diff.stderr.trim() || `git exited with code ${diff.code}`;
+      throw new Error(`Unable to collect review diff: ${reason}.`);
+    }
+
+    const context = await readDiffPrefix(diffPath) || "(No tracked changes against HEAD.)";
+    return {
+      ...request,
+      contextText: [request.contextText, `Tracked working-tree diff against HEAD:\n${context}`].filter(Boolean).join("\n\n"),
+    };
+  } finally {
+    await rm(diffPath, { force: true });
+  }
+}
+
 function renderRunResult(
   result: AgentToolResult<unknown>,
   options: ToolRenderResultOptions,
@@ -329,14 +395,11 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
     executionMode: "sequential",
     parameters: SpawnAgentParameters,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const existing = params.runId ? manager.getPersistent(params.runId) : undefined;
-      if (params.runId && !existing) {
-        throw new Error(`Unknown child run: ${params.runId}.`);
-      }
-
-      const defaults: ChildDefaults = existing
-        ? { cwd: existing.request.cwd, model: existing.request.model, thinkingLevel: existing.request.thinkingLevel }
-        : { cwd: ctx.cwd, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinkingLevel: pi.getThinkingLevel() };
+      const defaults: ChildDefaults = {
+        cwd: ctx.cwd,
+        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        thinkingLevel: pi.getThinkingLevel(),
+      };
       const prepared = await prepareChildRequest(params, defaults, ctx.modelRegistry);
       if (!prepared.ok) throw new Error(prepared.error);
 
@@ -367,6 +430,78 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
     },
     renderResult(result, options, theme) {
       return renderRunResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "continue_agent",
+    label: "Continue Agent",
+    description: "Continue a persistent child created by spawn_agent with keepAlive. The original model, tools, system prompt, and working directory are reused automatically.",
+    promptSnippet: "Continue a persistent child agent by runId without repeating its configuration",
+    executionMode: "sequential",
+    parameters: ContinueAgentParameters,
+    async execute(_toolCallId, params: ContinueAgentInput, signal, onUpdate, ctx) {
+      const existing = manager.getPersistent(params.runId);
+      if (!existing) throw new Error(`Unknown child run: ${params.runId}.`);
+
+      const prepared = await prepareChildRequest(
+        {
+          prompt: params.prompt,
+          contextText: params.contextText,
+          contextFiles: params.contextFiles,
+          systemPrompt: existing.request.systemPrompt,
+          model: existing.request.model,
+          thinkingLevel: existing.request.thinkingLevel,
+          tools: existing.request.tools,
+          cwd: existing.request.cwd,
+          timeoutMs: params.timeoutMs ?? existing.request.timeoutMs,
+        },
+        {
+          cwd: existing.request.cwd,
+          model: existing.request.model,
+          thinkingLevel: existing.request.thinkingLevel,
+        },
+        ctx.modelRegistry,
+      );
+      if (!prepared.ok) throw new Error(prepared.error);
+
+      const result = await executeSingle(
+        manager,
+        runChild,
+        { runId: params.runId },
+        prepared.request,
+        signal,
+        DEFAULT_CONCURRENCY,
+        (text, details) => onUpdate?.({ content: [{ type: "text", text }], details }),
+      );
+      throwIfFailed(result);
+      return { content: [{ type: "text", text: resultText(result) }], details: result };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("continue_agent ")) +
+          theme.fg("accent", compact(args.prompt ?? "…")) +
+          theme.fg("dim", ` [${args.runId}]`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, options, theme) {
+      return renderRunResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "close_agent",
+    label: "Close Agent",
+    description: "Cancel an active persistent child or close an idle one by runId.",
+    promptSnippet: "Cancel or close a persistent child agent by runId",
+    executionMode: "sequential",
+    parameters: CloseAgentParameters,
+    async execute(_toolCallId, params: CloseAgentInput) {
+      if (!manager.cancel(params.runId)) throw new Error(`Unknown child run: ${params.runId}.`);
+      const details = { runId: params.runId, closed: true };
+      return { content: [{ type: "text", text: resultText(details) }], details };
     },
   });
 
@@ -427,14 +562,15 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
     description: `Review code independently with the ${REVIEW_MODEL} child agent. Prioritizes concrete correctness, regression, security, and test findings without editing files.`,
     promptSnippet: "Review code with a strong independent child agent",
     promptGuidelines: [
-      "Use review after implementation when an independent correctness pass is valuable. Include the requirement and relevant change scope in its prompt or context.",
+      "Use review after implementation when an independent correctness pass is valuable. Include the requirement and relevant change scope in its prompt or context. Set includeDiff to true when reviewing current tracked working-tree changes.",
     ],
     executionMode: "parallel",
-    parameters: RoleAgentParameters,
-    async execute(_toolCallId, params: RoleAgentInput, signal, onUpdate, ctx) {
+    parameters: ReviewAgentParameters,
+    async execute(_toolCallId, params: ReviewAgentInput, signal, onUpdate, ctx) {
+      const { includeDiff, ...reviewInput } = params;
       const prepared = await prepareChildRequest(
         {
-          ...params,
+          ...reviewInput,
           systemPrompt: REVIEW_SYSTEM_PROMPT,
           model: REVIEW_MODEL,
           thinkingLevel: "high",
@@ -445,12 +581,13 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
       );
       if (!prepared.ok) throw new Error(prepared.error);
       requireExactModel(prepared.request, REVIEW_MODEL);
+      const request = includeDiff ? await addReviewDiff(pi, prepared.request, signal) : prepared.request;
 
       const result = await executeSingle(
         manager,
         runChild,
         {},
-        prepared.request,
+        request,
         signal,
         DEFAULT_CONCURRENCY,
         (text, details) => onUpdate?.({ content: [{ type: "text", text }], details }),
@@ -513,6 +650,7 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
             onUpdate?.({ content: [{ type: "text", text: `Task ${task.taskId ?? index + 1}: ${text}\n${batchProgress(results)}` }], details: { taskId: task.taskId, results, progress: details } });
           },
         );
+        if (task.taskId !== undefined) result.taskId = task.taskId;
         results[index] = result;
         onUpdate?.({ content: [{ type: "text", text: batchProgress(results) }], details: { results } });
       });
@@ -532,7 +670,7 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
       );
     },
     renderResult(result, options, theme) {
-      const details = result.details as { results?: RunResult[]; usage?: UsageStats; error?: string } | undefined;
+      const details = result.details as { results?: RunResult[]; usage?: UsageStats } | undefined;
       if (!details?.results || !details.usage) {
         const text = result.content.find((part) => part.type === "text");
         return new Text(theme.fg("warning", compact(text?.text ?? "Running…")), 0, 0);
@@ -542,11 +680,14 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
         return total;
       }, {});
       const summary = Object.entries(counts).map(([status, count]) => `${count} ${status}`).join(", ") || "no tasks started";
-      let text = theme.fg(details.error ? "error" : "success", summary) + theme.fg("dim", ` · ${usageText(details.usage)}`);
-      if (details.error) text += `\n${theme.fg("error", details.error)}`;
+      const failed = details.results.filter((child) => ["failed", "cancelled", "timed_out"].includes(child.status)).length;
+      const needsInput = details.results.some((child) => child.status === "needs_input");
+      const color = failed === 0 ? (needsInput ? "warning" : "success") : failed === details.results.length ? "error" : "warning";
+      let text = theme.fg(color, summary) + theme.fg("dim", ` · ${usageText(details.usage)}`);
       if (options.expanded) {
         for (const [index, child] of details.results.entries()) {
-          text += `\n${theme.fg("accent", `${index + 1}. ${child.status}`)} ${theme.fg("dim", child.runId)}`;
+          const label = child.taskId ?? String(index + 1);
+          text += `\n${theme.fg("accent", `${label}. ${child.status}`)} ${theme.fg("dim", child.runId)}`;
           if (child.output) text += `\n${child.output}`;
           if (child.error) text += `\n${theme.fg("error", child.error)}`;
         }

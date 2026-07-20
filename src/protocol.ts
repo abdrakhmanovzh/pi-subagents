@@ -48,6 +48,27 @@ function messageText(message: unknown): string {
     .join("\n");
 }
 
+function toolProgressText(toolName: string, args: unknown): string {
+  const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
+  const value = (key: string): string | undefined => {
+    const item = input[key];
+    if (typeof item !== "string") return undefined;
+    const oneLine = item.replace(/\s+/g, " ").trim();
+    return oneLine.length <= 120 ? oneLine : `${oneLine.slice(0, 119)}…`;
+  };
+
+  switch (toolName) {
+    case "read": return `Reading ${value("path") ?? "file"}…`;
+    case "grep": return `Searching for ${value("pattern") ?? "pattern"}…`;
+    case "find": return `Finding ${value("pattern") ?? "files"}…`;
+    case "ls": return `Listing ${value("path") ?? "."}…`;
+    case "bash": return `Running ${value("command") ?? "command"}…`;
+    case "edit": return `Editing ${value("path") ?? "file"}…`;
+    case "write": return `Writing ${value("path") ?? "file"}…`;
+    default: return `Running ${toolName}…`;
+  }
+}
+
 function addUsage(target: UsageStats, message: unknown): void {
   if (!message || typeof message !== "object") return;
   const usage = (message as { usage?: Record<string, unknown> }).usage;
@@ -72,6 +93,8 @@ export function applyProtocolEvent(
     type?: unknown;
     message?: unknown;
     error?: unknown;
+    toolName?: unknown;
+    args?: unknown;
   };
 
   if (typed.type === "message_end" && typed.message) {
@@ -95,8 +118,12 @@ export function applyProtocolEvent(
     }
   }
 
-  if (typed.type === "tool_execution_start") {
-    onProgress?.({ text: state.output, eventType: "tool_execution_start" });
+  if (typed.type === "tool_execution_start" && typeof typed.toolName === "string") {
+    onProgress?.({
+      text: toolProgressText(typed.toolName, typed.args),
+      eventType: "tool_execution_start",
+      toolName: typed.toolName,
+    });
   }
 
   if (typed.type === "extension_error") {

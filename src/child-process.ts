@@ -20,6 +20,7 @@ export interface ChildRequest {
 export interface ChildProgress {
   text: string;
   eventType: string;
+  toolName?: string;
 }
 
 export interface ChildExecution {

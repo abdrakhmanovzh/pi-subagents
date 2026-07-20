@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ChildProcess, spawn } from "node:child_process";
-import { runOneShot, type ChildRequest, type SpawnProcess } from "../src/child-process.ts";
+import { runOneShot, type ChildProgress, type ChildRequest, type SpawnProcess } from "../src/child-process.ts";
 import { RpcChildSession } from "../src/rpc-session.ts";
 
 const request: ChildRequest = {
@@ -74,11 +74,12 @@ function writeEvent(child: FakeChild, event: unknown): void {
 
 test("collects JSON events, output, and usage without forwarding token deltas", async () => {
   const child = new FakeChild();
-  const progress: string[] = [];
-  const execution = runOneShot(request, undefined, (event) => progress.push(event.eventType), fakeSpawn(child, () => {
+  const progress: ChildProgress[] = [];
+  const execution = runOneShot(request, undefined, (event) => progress.push(event), fakeSpawn(child, () => {
     queueMicrotask(() => {
       child.stdout.write("not json\n");
       writeEvent(child, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "d" } });
+      writeEvent(child, { type: "tool_execution_start", toolName: "read", args: { path: "src/index.ts" } });
       writeEvent(child, assistantEvent("done"));
       writeEvent(child, { type: "agent_settled" });
       child.close(0);
@@ -91,7 +92,10 @@ test("collects JSON events, output, and usage without forwarding token deltas", 
   assert.equal(result.usage.turns, 1);
   assert.equal(result.usage.inputTokens, 10);
   assert.equal(result.usage.cost, 0.25);
-  assert.deepEqual(progress, ["message_end"]);
+  assert.deepEqual(progress, [
+    { text: "Reading src/index.ts…", eventType: "tool_execution_start", toolName: "read" },
+    { text: "done", eventType: "message_end" },
+  ]);
 });
 
 test("detects clarification requests", async () => {
@@ -179,6 +183,17 @@ test("routes explicit follow-ups through one RPC child", async () => {
   assert.equal(prompts.length, 2);
   assert.match(prompts[1] ?? "", /follow up/);
   session.dispose();
+});
+
+test("handles RPC stdin errors without leaving the session usable", async () => {
+  const child = new FakeChild();
+  const session = new RpcChildSession(request, fakeSpawn(child));
+  const running = session.prompt(request, undefined);
+  child.stdin.emit("error", new Error("broken pipe"));
+
+  const result = await running;
+  assert.equal(result.error, "broken pipe");
+  assert.equal(session.isUsable, false);
 });
 
 test("rejects RPC follow-up configuration changes", async () => {
