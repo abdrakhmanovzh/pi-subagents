@@ -79,6 +79,8 @@ Optional fields:
 
 Models, thinking level, and working directory inherit from the parent when omitted.
 
+Generic `spawn_agent` calls execute sequentially because they can include `bash`, `edit`, or `write`. Use `spawn_agents` for concurrent independent read-only work. The extension also tells the parent agent not to issue multiple write-capable `spawn_agent` calls in one turn.
+
 #### Follow-ups
 
 Start a resumable child:

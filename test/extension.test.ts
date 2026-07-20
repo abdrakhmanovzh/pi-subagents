@@ -13,6 +13,7 @@ interface ToolResult {
 
 interface CapturedTool {
   description: string;
+  promptGuidelines?: string[];
   executionMode?: string;
   parameters: { properties?: Record<string, unknown> };
   execute: (...args: unknown[]) => Promise<ToolResult>;
@@ -65,6 +66,16 @@ const context = {
     ],
   },
 };
+
+test("serializes generic children and explains the write-capable restriction", () => {
+  const tool = captureTools().get("spawn_agent");
+  assert.ok(tool);
+
+  assert.equal(tool.executionMode, "sequential");
+  assert.match(tool.description, /write-capable and run sequentially/);
+  assert.match(tool.promptGuidelines?.join("\n") ?? "", /Do not issue multiple write-capable spawn_agent calls/);
+  assert.match(tool.promptGuidelines?.join("\n") ?? "", /Use spawn_agents for parallel read-only tasks/);
+});
 
 test("registers focused explore and review roles", () => {
   const tools = captureTools();

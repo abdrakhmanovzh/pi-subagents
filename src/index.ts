@@ -321,9 +321,12 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
   pi.registerTool({
     name: "spawn_agent",
     label: "Spawn Agent",
-    description: "Run one generic child Pi agent with explicit prompt, context, model, tools, cwd, and timeout. No predefined roles or workflows.",
+    description: "Run one generic child Pi agent with explicit prompt, context, model, tools, cwd, and timeout. Calls with bash, edit, or write are write-capable and run sequentially. Use spawn_agents for parallel read-only work.",
     promptSnippet: "Run one generic child agent with explicit capabilities and context",
-    executionMode: "parallel",
+    promptGuidelines: [
+      "Do not issue multiple write-capable spawn_agent calls in one assistant turn. A spawn_agent call is write-capable when tools includes bash, edit, or write. Wait for its result before starting another. Use spawn_agents for parallel read-only tasks.",
+    ],
+    executionMode: "sequential",
     parameters: SpawnAgentParameters,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const existing = params.runId ? manager.getPersistent(params.runId) : undefined;
