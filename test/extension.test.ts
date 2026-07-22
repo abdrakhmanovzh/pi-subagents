@@ -293,6 +293,56 @@ test("throws when either role child fails", async () => {
   }
 });
 
+test("shows how to expand a completed child result", async () => {
+  const tool = captureTools(async () => childExecution({ output: "first line\nsecond line" })).get("explore");
+  assert.ok(tool?.renderResult);
+
+  const result = await tool.execute("call", { prompt: "Explore" }, undefined, undefined, context);
+  const theme = {
+    fg: (color: string, text: string) => `[${color}]${text}`,
+    bold: (text: string) => text,
+  };
+  const collapsed = tool.renderResult(result, { expanded: false, isPartial: false }, theme);
+  const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, theme);
+
+  assert.match(collapsed.text, /to show full result/);
+  assert.doesNotMatch(collapsed.text, /first line\nsecond line/);
+  assert.match(expanded.text, /first line\nsecond line/);
+});
+
+test("shows finished parallel results while other children are still running", () => {
+  const tool = captureTools().get("spawn_agents");
+  assert.ok(tool?.renderResult);
+
+  const partial = {
+    content: [{ type: "text", text: "Task active-task: Reading src/index.ts…\nParallel: 1/2 done, 1 running…" }],
+    details: {
+      results: [
+        {
+          runId: "finished-run",
+          taskId: "finished-task",
+          status: "completed",
+          output: "finished child output",
+          usage: childExecution().usage,
+        },
+        undefined,
+      ],
+    },
+  };
+  const theme = {
+    fg: (color: string, text: string) => `[${color}]${text}`,
+    bold: (text: string) => text,
+  };
+  const collapsed = tool.renderResult(partial, { expanded: false, isPartial: true }, theme);
+  const expanded = tool.renderResult(partial, { expanded: true, isPartial: true }, theme);
+
+  assert.match(collapsed.text, /1 completed, 1 running/);
+  assert.match(collapsed.text, /Task active-task: Reading src\/index\.ts/);
+  assert.match(collapsed.text, /to show finished results/);
+  assert.match(expanded.text, /finished-task\. completed/);
+  assert.match(expanded.text, /finished child output/);
+});
+
 test("rejects an entire parallel batch containing write tools", async () => {
   const tool = captureTools().get("spawn_agents");
   assert.ok(tool);

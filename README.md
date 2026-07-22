@@ -154,7 +154,7 @@ Each child returns a structured envelope:
 
 Statuses are `completed`, `failed`, `cancelled`, `timed_out`, and `needs_input`. A failed single child causes `spawn_agent`, `continue_agent`, `explore`, or `review` to throw a tool error. Parallel batches preserve each child envelope and its optional `taskId` so the parent can inspect partial successes and failures. Children are instructed to prefix an unavoidable clarification question with `NEEDS_INPUT:` so it can be mapped to `needs_input` without opening child UI.
 
-While a child runs, progress updates identify its current tool action, such as the file being read or the pattern being searched.
+While a child runs, progress updates identify its current tool action, such as the file being read or the pattern being searched. Press the configured tool-expansion key (`Ctrl+O` by default) on a completed result to show its full output. In a parallel batch, finished child outputs can be expanded while the remaining children are still running.
 
 Outputs over 50 KiB are truncated in the result. The complete output is written to a temporary file reported as `outputFile` and removed when the parent session shuts down.
 

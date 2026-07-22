@@ -9,6 +9,7 @@ import type {
   Theme,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
+import { keyText } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { runOneShot, type ChildRequest } from "./child-process.ts";
 import { prepareChildRequest, type ChildDefaults } from "./resources.ts";
@@ -299,6 +300,10 @@ function usageText(usage: UsageStats | undefined): string {
   return `${usage.model ?? "unknown model"} · ${tokens} tokens · $${usage.cost.toFixed(4)} · ${(usage.durationMs / 1000).toFixed(1)}s`;
 }
 
+function expansionHint(theme: Theme, description: string): string {
+  return theme.fg("dim", keyText("app.tools.expand")) + theme.fg("muted", ` ${description}`);
+}
+
 function requireExactModel(request: ChildRequest, expectedModel: string): void {
   if (request.model !== expectedModel) {
     throw new Error(`Required role model ${expectedModel} is unavailable; resolved ${request.model ?? "no model"}.`);
@@ -375,8 +380,9 @@ function renderRunResult(
     if (details.output) text += `\n${details.output}`;
     if (details.error) text += `\n${theme.fg("error", details.error)}`;
     if (details.outputFile) text += `\n${theme.fg("dim", `Full output: ${details.outputFile}`)}`;
-  } else if (details.output) {
-    text += `\n${theme.fg("dim", compact(details.output, 160))}`;
+  } else if (details.output || details.error) {
+    if (details.output) text += `\n${theme.fg("dim", compact(details.output, 160))}`;
+    text += `\n${expansionHint(theme, "to show full result")}`;
   }
   return new Text(text, 0, 0);
 }
@@ -670,27 +676,46 @@ export default function (pi: ExtensionAPI, runChild: typeof runOneShot = runOneS
       );
     },
     renderResult(result, options, theme) {
-      const details = result.details as { results?: RunResult[]; usage?: UsageStats } | undefined;
-      if (!details?.results || !details.usage) {
+      const details = result.details as { results?: Array<RunResult | undefined>; usage?: UsageStats } | undefined;
+      if (!details?.results) {
         const text = result.content.find((part) => part.type === "text");
         return new Text(theme.fg("warning", compact(text?.text ?? "Running…")), 0, 0);
       }
-      const counts = details.results.reduce<Record<string, number>>((total, child) => {
+
+      const finished = details.results.flatMap((child, index) => child ? [{ child, index }] : []);
+      const running = details.results.length - finished.length;
+      const counts = finished.reduce<Record<string, number>>((total, { child }) => {
         total[child.status] = (total[child.status] ?? 0) + 1;
         return total;
       }, {});
-      const summary = Object.entries(counts).map(([status, count]) => `${count} ${status}`).join(", ") || "no tasks started";
-      const failed = details.results.filter((child) => ["failed", "cancelled", "timed_out"].includes(child.status)).length;
-      const needsInput = details.results.some((child) => child.status === "needs_input");
-      const color = failed === 0 ? (needsInput ? "warning" : "success") : failed === details.results.length ? "error" : "warning";
-      let text = theme.fg(color, summary) + theme.fg("dim", ` · ${usageText(details.usage)}`);
+      const summaryParts = Object.entries(counts).map(([status, count]) => `${count} ${status}`);
+      if (running > 0) summaryParts.push(`${running} running`);
+      const summary = summaryParts.join(", ") || "no tasks started";
+      const failed = finished.filter(({ child }) => ["failed", "cancelled", "timed_out"].includes(child.status)).length;
+      const needsInput = finished.some(({ child }) => child.status === "needs_input");
+      const color = running > 0
+        ? "warning"
+        : failed === 0
+          ? (needsInput ? "warning" : "success")
+          : failed === finished.length
+            ? "error"
+            : "warning";
+      const usage = details.usage ?? aggregateUsage(finished.map(({ child }) => child));
+      let text = theme.fg(color, summary) + theme.fg("dim", ` · ${usageText(usage)}`);
+      const progress = result.content.find((part) => part.type === "text")?.text.split("\n")[0]?.trim();
+      if (options.isPartial && progress && !progress.startsWith("Parallel:")) {
+        text += `\n${theme.fg("dim", compact(progress, 160))}`;
+      }
       if (options.expanded) {
-        for (const [index, child] of details.results.entries()) {
+        for (const { child, index } of finished) {
           const label = child.taskId ?? String(index + 1);
           text += `\n${theme.fg("accent", `${label}. ${child.status}`)} ${theme.fg("dim", child.runId)}`;
           if (child.output) text += `\n${child.output}`;
           if (child.error) text += `\n${theme.fg("error", child.error)}`;
+          if (child.outputFile) text += `\n${theme.fg("dim", `Full output: ${child.outputFile}`)}`;
         }
+      } else if (finished.some(({ child }) => child.output || child.error)) {
+        text += `\n${expansionHint(theme, "to show finished results")}`;
       }
       return new Text(text, 0, 0);
     },
